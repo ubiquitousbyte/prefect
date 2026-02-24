@@ -1,0 +1,170 @@
+---
+title: prefect-nomad
+---
+
+`prefect-nomad` enables orchestration and execution of Prefect flows on HashiCorp Nomad clusters using the Docker task driver.
+
+## Getting started
+
+### Prerequisites
+
+- [Nomad cluster](https://www.nomadproject.io/) running and accessible
+- Docker driver configured on Nomad client nodes
+- Network connectivity from the Prefect worker to the Nomad API
+
+### Install `prefect-nomad`
+
+Install the latest version of `prefect-nomad`:
+
+```bash
+pip install -U prefect-nomad
+```
+
+## Nomad worker
+
+The Nomad worker executes flow runs as Nomad batch jobs. Each flow run becomes a separate batch job with a single task group and task running the Prefect flow in a Docker container.
+
+### Configuration
+
+Configure the worker through work pool settings or job configuration overrides:
+
+- **Image**: Docker image to use (defaults to current Prefect image)
+- **Datacenters**: List of Nomad datacenters to target
+- **Resources**: CPU (MHz) and memory (MiB) requirements
+- **Namespace/Region**: Nomad namespace and region for job placement
+- **Docker options**: Authentication, network mode, privileged mode, force pull
+- **Timeouts**: Job timeout and polling interval
+
+### Create a work pool
+
+Create a Nomad work pool:
+
+```bash
+prefect work-pool create --type nomad my-nomad-pool
+```
+
+Configure work pool settings via the UI or CLI to set default values for image, resources, datacenters, etc.
+
+### Start a worker
+
+Start a Nomad worker to poll the work pool and execute flow runs:
+
+```bash
+prefect worker start --pool my-nomad-pool
+```
+
+The worker will:
+1. Poll the work pool for scheduled flow runs
+2. Submit each flow run as a Nomad batch job
+3. Monitor the job's evaluation (scheduling decision)
+4. Wait for the allocation to complete
+5. Stream logs from the running task
+6. Report the exit code back to Prefect
+
+## Nomad credentials
+
+Store Nomad connection details as a reusable block for authentication and configuration.
+
+```python
+from prefect_nomad import NomadCredentials
+
+# Create credentials for an authenticated Nomad cluster
+nomad_creds = NomadCredentials(
+    address="https://nomad.example.com:4646",
+    token="your-nomad-token",
+    namespace="production",
+    region="us-east",
+)
+nomad_creds.save("my-nomad-creds")
+```
+
+Reference the credentials in your work pool configuration or flow deployment.
+
+## Job lifecycle
+
+The Nomad worker implements two-phase monitoring matching the Nomad CLI:
+
+### Phase 1: Evaluation (scheduling decision)
+
+After submitting a job, the worker monitors the evaluation to ensure Nomad successfully scheduled the job:
+
+- **Success**: Evaluation completes with allocations created
+- **Scheduling failure**: No nodes available, constraints not met, resources exhausted → raises error with details
+- **Failed/Canceled**: Evaluation rejected by scheduler → raises error
+
+### Phase 2: Allocation (job execution)
+
+Once scheduling succeeds, the worker monitors the allocation until the task completes:
+
+- **Running**: Streams logs from the container
+- **Complete**: Extracts exit code and returns result
+- **Failed/Lost**: Reports non-zero exit code
+
+This two-phase approach prevents the worker from hanging indefinitely when Nomad cannot schedule a job.
+
+## Examples
+
+### Deploy a flow to run on Nomad
+
+```python
+from prefect import flow
+
+@flow
+def my_flow(name: str = "world"):
+    print(f"Hello, {name}!")
+
+if __name__ == "__main__":
+    my_flow.deploy(
+        name="nomad-deployment",
+        work_pool_name="my-nomad-pool",
+        image="my-registry/my-image:latest",
+    )
+```
+
+### Override job configuration
+
+Customize resource requirements and other settings per deployment:
+
+```python
+from prefect.deployments import DeploymentImage
+
+my_flow.deploy(
+    name="resource-intensive-job",
+    work_pool_name="my-nomad-pool",
+    image=DeploymentImage(
+        name="my-registry/ml-image:latest",
+        pull_policy="Always",
+    ),
+    job_variables={
+        "task_resources": {
+            "cpu": 2000,  # 2000 MHz
+            "memory_mb": 4096,  # 4 GiB
+        },
+        "datacenters": ["dc1", "dc2"],
+        "priority": 75,
+    },
+)
+```
+
+### Configure credentials in a deployment
+
+```python
+from prefect_nomad import NomadCredentials
+
+my_flow.deploy(
+    name="authenticated-deployment",
+    work_pool_name="my-nomad-pool",
+    job_variables={
+        "nomad_credentials": NomadCredentials.load("my-nomad-creds"),
+    },
+)
+```
+
+## Resources
+
+For assistance with Nomad:
+- [Nomad Documentation](https://www.nomadproject.io/docs)
+- [Docker Task Driver](https://developer.hashicorp.com/nomad/docs/job-declare/task-driver/docker)
+- [Nomad Schedulers](https://www.nomadproject.io/docs/schedulers)
+
+Refer to the SDK documentation to explore all capabilities of this integration.
