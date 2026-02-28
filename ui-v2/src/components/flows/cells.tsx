@@ -76,7 +76,7 @@ export const FlowLastRun = ({ row }: { row: { original: Flow } }) => {
 				/>
 			)}
 			<Link to="/runs/flow-run/$id" params={{ id: lastRun.id ?? "" }}>
-				<span className="text-sm text-blue-700 hover:underline">
+				<span className="text-sm text-link hover:text-link-hover hover:underline">
 					{lastRun.name}
 				</span>
 			</Link>
@@ -99,7 +99,7 @@ export const FlowNextRun = ({ row }: { row: { original: Flow } }) => {
 				<StateIcon type={nextRun.state_type} name={nextRun.state_name} />
 			)}
 			<Link to="/runs/flow-run/$id" params={{ id: nextRun.id ?? "" }}>
-				<span className="text-sm text-blue-700 hover:underline">
+				<span className="text-sm text-link hover:text-link-hover hover:underline">
 					{nextRun.name}
 				</span>
 			</Link>
@@ -128,8 +128,8 @@ export const FlowDeploymentCount = ({ row }: { row: { original: Flow } }) => {
 			params={{ id: flowId }}
 			search={{ tab: "deployments" }}
 		>
-			<span className="text-sm text-blue-700 hover:underline">
-				{count} {pluralize(count, "Deployment")}
+			<span className="text-sm text-link hover:text-link-hover hover:underline">
+				{count.toLocaleString()} {pluralize(count, "Deployment")}
 			</span>
 		</Link>
 	);
