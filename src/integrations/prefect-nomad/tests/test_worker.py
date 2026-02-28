@@ -6,6 +6,11 @@ from unittest.mock import MagicMock, patch
 import anyio.abc
 import pytest
 from prefect_nomad.credentials import NomadCredentials
+from prefect_nomad.exceptions import (
+    NomadEvaluationError,
+    NomadJobSchedulingError,
+    NomadJobTimeoutError,
+)
 from prefect_nomad.worker import (
     NomadTaskResources,
     NomadWorker,
@@ -571,12 +576,12 @@ class TestWaitForEvaluation:
     def test_eval_scheduling_failure_raises(
         self, mock_nomad_client_eval_scheduling_failure
     ):
-        """Evaluation with FailedTGAllocs raises RuntimeError."""
+        """Evaluation with FailedTGAllocs raises NomadJobSchedulingError."""
         cfg = NomadWorkerJobConfiguration(image="prefect:latest", poll_interval=1)
         worker = self._worker()
         worker._logger = MagicMock()
 
-        with pytest.raises(RuntimeError, match="failed to schedule"):
+        with pytest.raises(NomadJobSchedulingError, match="failed to schedule"):
             worker._wait_for_evaluation(
                 mock_nomad_client_eval_scheduling_failure,
                 "eval-123",
@@ -586,12 +591,12 @@ class TestWaitForEvaluation:
             )
 
     def test_eval_failed_raises(self, mock_nomad_client_eval_failed):
-        """Evaluation with status=failed raises RuntimeError."""
+        """Evaluation with status=failed raises NomadEvaluationError."""
         cfg = NomadWorkerJobConfiguration(image="prefect:latest", poll_interval=1)
         worker = self._worker()
         worker._logger = MagicMock()
 
-        with pytest.raises(RuntimeError, match="failed"):
+        with pytest.raises(NomadEvaluationError, match="failed"):
             worker._wait_for_evaluation(
                 mock_nomad_client_eval_failed,
                 "eval-123",
@@ -601,12 +606,12 @@ class TestWaitForEvaluation:
             )
 
     def test_eval_canceled_raises(self, mock_nomad_client_eval_canceled):
-        """Evaluation with status=canceled raises RuntimeError."""
+        """Evaluation with status=canceled raises NomadEvaluationError."""
         cfg = NomadWorkerJobConfiguration(image="prefect:latest", poll_interval=1)
         worker = self._worker()
         worker._logger = MagicMock()
 
-        with pytest.raises(RuntimeError, match="canceled"):
+        with pytest.raises(NomadEvaluationError, match="canceled"):
             worker._wait_for_evaluation(
                 mock_nomad_client_eval_canceled,
                 "eval-123",
@@ -639,7 +644,7 @@ class TestWaitForEvaluation:
         )
 
     def test_eval_timeout_raises(self, mock_nomad_client):
-        """Evaluation that takes too long raises RuntimeError."""
+        """Evaluation that takes too long raises NomadJobTimeoutError."""
         cfg = NomadWorkerJobConfiguration(
             image="prefect:latest", poll_interval=1, job_timeout=1
         )
@@ -660,7 +665,9 @@ class TestWaitForEvaluation:
 
         # Patch time.sleep to avoid actual delays
         with patch("time.sleep"):
-            with pytest.raises(RuntimeError, match="timed out.*evaluation phase"):
+            with pytest.raises(
+                NomadJobTimeoutError, match="timed out.*evaluation phase"
+            ):
                 worker._wait_for_evaluation(
                     mock_nomad_client, "eval-123", "test-job", cfg, start_time
                 )
@@ -701,7 +708,7 @@ class TestWaitForJobCompletionTimeout:
         return NomadWorker.__new__(NomadWorker)
 
     def test_allocation_timeout_raises(self, mock_nomad_client):
-        """Allocation polling that exceeds job_timeout raises RuntimeError."""
+        """Allocation polling that exceeds job_timeout raises NomadJobTimeoutError."""
         cfg = NomadWorkerJobConfiguration(
             image="prefect:latest", poll_interval=1, job_timeout=1
         )
@@ -727,7 +734,7 @@ class TestWaitForJobCompletionTimeout:
 
         # Patch time.sleep to avoid actual delays
         with patch("time.sleep"):
-            with pytest.raises(RuntimeError, match="timed out"):
+            with pytest.raises(NomadJobTimeoutError, match="timed out"):
                 worker._wait_for_job_completion(
                     mock_nomad_client,
                     "test-job",

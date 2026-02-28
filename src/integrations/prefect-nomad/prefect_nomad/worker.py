@@ -83,6 +83,13 @@ from prefect.utilities.dockerutils import get_prefect_image_name
 from prefect.workers.base import BaseJobConfiguration, BaseWorker, BaseWorkerResult
 
 from .credentials import NomadCredentials
+from .exceptions import (
+    NomadEvaluationError,
+    NomadJobRegistrationError,
+    NomadJobSchedulingError,
+    NomadJobStopError,
+    NomadJobTimeoutError,
+)
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -574,7 +581,7 @@ class NomadWorker(BaseWorker):
         try:
             return nomad_client.job.register_job(job_id, job_spec)
         except nomad.api.exceptions.BaseNomadException as exc:
-            raise RuntimeError(
+            raise NomadJobRegistrationError(
                 f"Failed to register Nomad job {job_id!r}: {exc}"
             ) from exc
 
@@ -601,8 +608,9 @@ class NomadWorker(BaseWorker):
             start_time: The start time (from time.monotonic()) for timeout tracking.
 
         Raises:
-            RuntimeError: If the evaluation fails, is canceled, has scheduling
-                failures, or times out.
+            NomadJobTimeoutError: If the job times out during evaluation.
+            NomadJobSchedulingError: If the job fails to schedule.
+            NomadEvaluationError: If the evaluation fails or is canceled.
         """
         current_eval_id = eval_id
 
@@ -611,7 +619,7 @@ class NomadWorker(BaseWorker):
             if configuration.job_timeout is not None:
                 elapsed = time.monotonic() - start_time
                 if elapsed > configuration.job_timeout:
-                    raise RuntimeError(
+                    raise NomadJobTimeoutError(
                         f"Nomad job {job_id!r} timed out after "
                         f"{configuration.job_timeout} seconds during evaluation phase"
                     )
@@ -658,7 +666,7 @@ class NomadWorker(BaseWorker):
                         detail += ", ".join(reasons) if reasons else "unknown failure"
                         failure_details.append(detail)
 
-                    raise RuntimeError(
+                    raise NomadJobSchedulingError(
                         f"Nomad job {job_id!r} failed to schedule. "
                         f"Evaluation {current_eval_id[:8]} completed with scheduling failures: "
                         + "; ".join(failure_details)
@@ -672,13 +680,13 @@ class NomadWorker(BaseWorker):
 
             elif status == "failed":
                 status_desc = eval_data.get("StatusDescription", "")
-                raise RuntimeError(
+                raise NomadEvaluationError(
                     f"Nomad evaluation {current_eval_id[:8]} failed"
                     + (f": {status_desc}" if status_desc else "")
                 )
 
             elif status == "canceled":
-                raise RuntimeError(
+                raise NomadEvaluationError(
                     f"Nomad evaluation {current_eval_id[:8]} was canceled"
                 )
 
@@ -723,7 +731,7 @@ class NomadWorker(BaseWorker):
             The exit code of the task (0 for success, non-zero for failure).
 
         Raises:
-            RuntimeError: If the job times out.
+            NomadJobTimeoutError: If the job times out.
         """
         last_event = created_event
         log_offset = 0
@@ -735,7 +743,7 @@ class NomadWorker(BaseWorker):
             if configuration.job_timeout is not None and start_time is not None:
                 elapsed = time.monotonic() - start_time
                 if elapsed > configuration.job_timeout:
-                    raise RuntimeError(
+                    raise NomadJobTimeoutError(
                         f"Nomad job {job_id!r} timed out after "
                         f"{configuration.job_timeout} seconds"
                     )
@@ -967,6 +975,7 @@ class NomadWorker(BaseWorker):
 
         Raises:
             InfrastructureNotFound: If the job doesn't exist.
+            NomadJobStopError: If the job fails to stop.
         """
         try:
             nomad_client.job.deregister_job(job_id, purge=True)
@@ -974,7 +983,9 @@ class NomadWorker(BaseWorker):
         except nomad.api.exceptions.URLNotFoundNomadException:
             raise InfrastructureNotFound(f"Nomad job {job_id!r} not found")
         except nomad.api.exceptions.BaseNomadException as exc:
-            raise RuntimeError(f"Failed to stop Nomad job {job_id!r}: {exc}") from exc
+            raise NomadJobStopError(
+                f"Failed to stop Nomad job {job_id!r}: {exc}"
+            ) from exc
 
     def _job_as_resource(self, job_id: str) -> dict[str, str]:
         """Convert a Nomad job to a Prefect event resource dictionary."""
