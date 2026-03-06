@@ -230,6 +230,7 @@
           {
             "group": "AI",
             "pages": [
+              "v3/how-to-guides/ai/index",
               "v3/how-to-guides/ai/use-prefect-mcp-server"
             ]
           },
@@ -726,6 +727,19 @@
                 ]
               },
               {
+                "group": "Nomad",
+                "pages": [
+                  "integrations/prefect-nomad/index",
+                  {
+                    "group": "SDK Reference",
+                    "pages": [
+                      "integrations/prefect-nomad/api-ref/prefect_nomad-credentials",
+                      "integrations/prefect-nomad/api-ref/prefect_nomad-worker"
+                    ]
+                  }
+                ]
+              },
+              {
                 "group": "Ray",
                 "pages": [
                   "integrations/prefect-ray/index",
@@ -831,9 +845,7 @@
                   "v3/api-ref/rest-api/index",
                   {
                     "group": "Cloud API",
-                    "pages": [
-                      "v3/api-ref/rest-api/cloud/index"
-                    ]
+                    "pages": ["v3/api-ref/rest-api/cloud/index"]
                   },
                   {
                     "group": "Server API",

@@ -1,0 +1,206 @@
+---
+title: worker
+sidebarTitle: worker
+---
+
+# `prefect_nomad.worker`
+
+
+
+Module containing the Nomad worker used for executing flow runs as Nomad jobs.
+
+The Nomad worker submits flow runs as batch jobs to a HashiCorp Nomad cluster
+using the Docker task driver. Each flow run becomes a Nomad job with a single
+task group and task that runs the Prefect flow in a Docker container.
+
+Job Lifecycle (Two-Phase Monitoring)
+-------------------------------------
+
+    ┌─────────────────────────────────────────────────────────────────┐
+    │  Phase 1: Evaluation (Scheduling Decision)                      │
+    │  ┌──────────┐   pending    ┌──────────┐   complete   ┌────────┐ │
+    │  │ Register │─────────────>│Evaluation│────────────> │Success │ │
+    │  │   Job    │              │  (Nomad  │              └────────┘ │
+    │  └──────────┘              │Scheduler)│                         │
+    │       │                    └──────────┘                         │
+    │       │                         │ blocked → NextEval (chain)    │
+    │       │                         │ failed / canceled             │
+    │       │                         v                               │
+    │       │                    ┌─────────────────────┐              │
+    │       │                    │ FailedTGAllocs Set? │              │
+    │       │                    │ (No matching nodes, │              │
+    │       │                    │  resource shortage) │              │
+    │       │                    └─────────────────────┘              │
+    │       │                             │                           │
+    │       v                             v                           │
+    │  RuntimeError &lt;──────────────── FAILURE                         │
+    └─────────────────────────────────────────────────────────────────┘
+                                      │
+                                      │ Evaluation succeeded
+                                      v
+    ┌─────────────────────────────────────────────────────────────────┐
+    │  Phase 2: Allocation (Job Execution)                            │
+    │  ┌──────────┐   running   ┌──────────┐  complete  ┌──────────┐  │
+    │  │  Client  │────────────&gt;│   Task   │───────────>│Exit Code │  │
+    │  │ Schedules│             │  Running │            │   = 0    │  │
+    │  │   Task   │             │ (stream  │            └──────────┘  │
+    │  └──────────┘             │  logs)   │                          │
+    │       │                   └──────────┘                          │
+    │       │ (no allocations yet)   │ failed / lost                  │
+    │       │                        v                                │
+    │       │                   ┌──────────┐                          │
+    │       │                   │Exit Code │                          │
+    │       │                   │   ≠ 0    │                          │
+    │       v                   └──────────┘                          │
+    │  job_timeout ───────────> FAILURE                               │
+    └─────────────────────────────────────────────────────────────────┘
+
+To start a Nomad worker, run the following command:
+
+```bash
+prefect worker start --pool 'my-work-pool' --type nomad
+```
+
+Replace `my-work-pool` with the name of the work pool you want the worker
+to poll for flow runs.
+
+For more information about work pools and workers,
+checkout out the [Prefect docs](https://docs.prefect.io/latest/deploy/infrastructure-concepts).
+
+
+## Classes
+
+### `NomadTaskResources` <sup><a href="https://github.com/PrefectHQ/prefect/blob/main/src/integrations/prefect-nomad/prefect_nomad/worker.py#L110" target="_blank"><Icon icon="github" style="width: 14px; height: 14px;" /></a></sup>
+
+
+Resource requirements for a Nomad task.
+
+**Attributes:**
+- `cpu`: CPU resources to reserve in MHz.
+- `memory_mb`: Memory to reserve in MiB.
+
+
+### `NomadWorkerJobConfiguration` <sup><a href="https://github.com/PrefectHQ/prefect/blob/main/src/integrations/prefect-nomad/prefect_nomad/worker.py#L130" target="_blank"><Icon icon="github" style="width: 14px; height: 14px;" /></a></sup>
+
+
+Configuration class used by the Nomad worker.
+
+An instance of this class is passed to the Nomad worker's `run` method
+for each flow run. It contains all the information necessary to execute the
+flow run as a Nomad job using the Docker task driver.
+
+**Attributes:**
+- `image`: The Docker image to use for the Nomad task.
+- `nomad_credentials`: Optional credentials block for authenticating with Nomad.
+- `datacenters`: List of Nomad datacenters to target for job placement.
+- `namespace`: The Nomad namespace to submit the job to.
+- `region`: The Nomad region to submit the job to.
+- `task_resources`: CPU and memory resource requirements for the task.
+- `docker_auth`: Docker registry authentication credentials.
+- `network_mode`: Docker network mode (e.g. bridge, host).
+- `privileged`: Whether to run the Docker container in privileged mode.
+- `force_pull`: Whether to always pull the Docker image, even if present locally.
+- `extra_docker_config`: Additional Docker driver configuration options.
+- `extra_task_config`: Additional Nomad task-level configuration options.
+- `stream_output`: Whether to stream task logs to local stdout.
+- `priority`: Nomad job priority (0-100, higher is more important).
+- `meta`: Additional metadata key-value pairs for the Nomad job.
+- `poll_interval`: Interval in seconds between allocation status polls.
+
+
+**Methods:**
+
+#### `build_nomad_job_spec` <sup><a href="https://github.com/PrefectHQ/prefect/blob/main/src/integrations/prefect-nomad/prefect_nomad/worker.py#L326" target="_blank"><Icon icon="github" style="width: 14px; height: 14px;" /></a></sup>
+
+```python
+build_nomad_job_spec(self) -> dict[str, Any]
+```
+
+Builds a complete Nomad job specification for the Docker task driver.
+
+**Returns:**
+- A dictionary containing the Nomad job specification in the format
+- expected by the Nomad HTTP API (wrapped in a `Job` key).
+
+
+#### `prepare_for_flow_run` <sup><a href="https://github.com/PrefectHQ/prefect/blob/main/src/integrations/prefect-nomad/prefect_nomad/worker.py#L257" target="_blank"><Icon icon="github" style="width: 14px; height: 14px;" /></a></sup>
+
+```python
+prepare_for_flow_run(self, flow_run: 'FlowRun', deployment: 'DeploymentResponse | None' = None, flow: 'APIFlow | None' = None, work_pool: 'WorkPool | None' = None, worker_name: 'str | None' = None, worker_id: 'UUID | None' = None)
+```
+
+Prepares the job configuration for a specific flow run.
+
+Naming convention:
+- Nomad **Job ID/Name**: deployment name + 8-char flow run ID suffix
+  (falls back to flow run name when no deployment exists).
+- Nomad **TaskGroup Name**: flow run name.
+- Nomad **Task Name**: flow run name.
+
+All names are slugified for Nomad compatibility (RFC 1123: lowercase
+alphanumeric + hyphens, max 63 chars).
+
+
+### `NomadWorkerResult` <sup><a href="https://github.com/PrefectHQ/prefect/blob/main/src/integrations/prefect-nomad/prefect_nomad/worker.py#L433" target="_blank"><Icon icon="github" style="width: 14px; height: 14px;" /></a></sup>
+
+
+Contains information about a completed Nomad job.
+
+
+### `NomadWorker` <sup><a href="https://github.com/PrefectHQ/prefect/blob/main/src/integrations/prefect-nomad/prefect_nomad/worker.py#L437" target="_blank"><Icon icon="github" style="width: 14px; height: 14px;" /></a></sup>
+
+
+Prefect worker that executes flow runs as Nomad jobs using the Docker
+task driver.
+
+This worker submits each flow run as a Nomad batch job. The job uses the
+Docker task driver to run the Prefect flow in a container. The worker polls
+the job's allocation status until the task reaches a terminal state, and
+optionally streams logs from the allocation.
+
+**Attributes:**
+- `type`: The worker type identifier (`nomad`).
+
+
+**Methods:**
+
+#### `kill_infrastructure` <sup><a href="https://github.com/PrefectHQ/prefect/blob/main/src/integrations/prefect-nomad/prefect_nomad/worker.py#L937" target="_blank"><Icon icon="github" style="width: 14px; height: 14px;" /></a></sup>
+
+```python
+kill_infrastructure(self, infrastructure_pid: str, configuration: NomadWorkerJobConfiguration, grace_seconds: int = 30) -> None
+```
+
+Stops a running Nomad job.
+
+**Args:**
+- `infrastructure_pid`: The infrastructure PID in format
+`<nomad_address>\:<job_id>`.
+- `configuration`: The job configuration.
+- `grace_seconds`: Not directly used for Nomad (Nomad handles
+graceful shutdown via kill_timeout on the task), but kept
+for API compatibility.
+
+**Raises:**
+- `InfrastructureNotFound`: If the job doesn't exist in Nomad.
+
+
+#### `run` <sup><a href="https://github.com/PrefectHQ/prefect/blob/main/src/integrations/prefect-nomad/prefect_nomad/worker.py#L484" target="_blank"><Icon icon="github" style="width: 14px; height: 14px;" /></a></sup>
+
+```python
+run(self, flow_run: 'FlowRun', configuration: NomadWorkerJobConfiguration, task_status: anyio.abc.TaskStatus[str] | None = None) -> NomadWorkerResult
+```
+
+Executes a flow run by submitting it as a Nomad batch job.
+
+This method registers a Nomad job with the Docker task driver,
+polls the allocation status until completion, optionally streams
+logs, and returns the result.
+
+**Args:**
+- `flow_run`: The flow run to execute.
+- `configuration`: The job configuration.
+- `task_status`: Optional task status to report the infrastructure PID.
+
+**Returns:**
+- A `NomadWorkerResult` with the job's exit code.
+
