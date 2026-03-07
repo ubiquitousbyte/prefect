@@ -29,6 +29,7 @@ from prefect.server.database.dependencies import db_injector, provide_database_i
 from prefect.server.exceptions import ObjectNotFoundError
 from prefect.server.models import concurrency_limits, concurrency_limits_v2, deployments
 from prefect.server.orchestration.dependencies import (
+    MIN_CLIENT_VERSION_FOR_CLIENT_SIDE_LEASE_RELEASE,
     MIN_CLIENT_VERSION_FOR_CONCURRENCY_LIMIT_LEASING,
     WORKER_VERSIONS_THAT_MANAGE_DEPLOYMENT_CONCURRENCY,
 )
@@ -844,20 +845,97 @@ class ReleaseFlowConcurrencySlots(FlowRunUniversalTransform):
     """
     Releases deployment concurrency slots held by a flow run.
 
-    This rule is DISABLED to allow clients to explicitly release leases,
-    avoiding race conditions between server-side revocation and client-side renewal.
-    Clients now call release_concurrency_slots_with_lease() after successful
-    state transitions to terminal states.
+    For backwards compatibility:
+    - Old clients (< 3.6.23): Server auto-releases leases during state transitions
+    - New clients (>= 3.6.23): Clients explicitly release leases after successful
+      state transitions, so server skips auto-release to avoid race conditions
+      with client-side renewal background task.
+
+    This rule releases a concurrency slot for a deployment when a flow run
+    transitions out of the Running, Cancelling, or Pending state.
     """
 
     async def after_transition(
         self,
         context: OrchestrationContext[orm_models.FlowRun, core.FlowRunPolicy],
     ) -> None:
-        # DISABLED: Server no longer automatically revokes leases during state transitions.
-        # Clients are responsible for explicitly releasing leases after successful
-        # state transitions to avoid race conditions with the renewal background task.
-        return
+        # Skip auto-release for new clients (>= 3.6.23) that handle lease release themselves
+        # If client_version is None, assume old client (safe default, enables auto-release)
+        if context.client_version:
+            client_version = (
+                Version(context.client_version)
+                if isinstance(context.client_version, str)
+                else context.client_version
+            )
+            if client_version >= MIN_CLIENT_VERSION_FOR_CLIENT_SIDE_LEASE_RELEASE:
+                # New client will explicitly release the lease after successful state transition
+                return
+
+        # OLD BEHAVIOR: Server auto-releases leases for old clients
+        if self.nullified_transition():
+            return
+
+        initial_state_type = (
+            context.initial_state.type if context.initial_state else None
+        )
+        proposed_state_type = (
+            context.proposed_state.type if context.proposed_state else None
+        )
+
+        # Check if the transition is valid for releasing concurrency slots.
+        # This should happen within `after_transition` because BaseUniversalTransforms
+        # don't know how to "fizzle" themselves if they encounter a transition that
+        # shouldn't apply to them, even if they use FROM_STATES and TO_STATES.
+        if not (
+            initial_state_type
+            in {
+                states.StateType.RUNNING,
+                states.StateType.CANCELLING,
+                states.StateType.PENDING,
+            }
+            and proposed_state_type
+            not in {
+                states.StateType.PENDING,
+                states.StateType.RUNNING,
+                states.StateType.CANCELLING,
+            }
+        ):
+            return
+        if not context.session or not context.run.deployment_id:
+            return
+
+        lease_storage = get_concurrency_lease_storage()
+        if (
+            context.initial_state
+            and context.initial_state.state_details.deployment_concurrency_lease_id
+            and (
+                lease := await lease_storage.read_lease(
+                    lease_id=context.initial_state.state_details.deployment_concurrency_lease_id,
+                )
+            )
+            and lease.metadata
+        ):
+            await concurrency_limits_v2.bulk_decrement_active_slots(
+                session=context.session,
+                concurrency_limit_ids=lease.resource_ids,
+                slots=lease.metadata.slots,
+            )
+            await lease_storage.revoke_lease(
+                lease_id=lease.id,
+            )
+        else:
+            deployment = await deployments.read_deployment(
+                session=context.session,
+                deployment_id=context.run.deployment_id,
+            )
+            if not deployment or not deployment.concurrency_limit_id:
+                return
+
+            await concurrency_limits_v2.bulk_decrement_active_slots(
+                session=context.session,
+                concurrency_limit_ids=[deployment.concurrency_limit_id],
+                slots=1,
+            )
 
 
 class CacheInsertion(TaskRunOrchestrationRule):
