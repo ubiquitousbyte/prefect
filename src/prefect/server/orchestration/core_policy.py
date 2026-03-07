@@ -664,15 +664,17 @@ class SecureFlowConcurrencySlots(FlowRunOrchestrationRule):
             if not deployment or not deployment.concurrency_limit_id:
                 return
 
-            await concurrency_limits_v2.bulk_decrement_active_slots(
-                session=context.session,
-                concurrency_limit_ids=[deployment.concurrency_limit_id],
-                slots=1,
-            )
+            # Only decrement active slots if a lease was actually acquired
+            # (i.e., if deployment_concurrency_lease_id exists in validated_state)
             if (
                 validated_state
                 and validated_state.state_details.deployment_concurrency_lease_id
             ):
+                await concurrency_limits_v2.bulk_decrement_active_slots(
+                    session=context.session,
+                    concurrency_limit_ids=[deployment.concurrency_limit_id],
+                    slots=1,
+                )
                 lease_storage = get_concurrency_lease_storage()
                 await lease_storage.revoke_lease(
                     lease_id=validated_state.state_details.deployment_concurrency_lease_id,
@@ -842,78 +844,20 @@ class ReleaseFlowConcurrencySlots(FlowRunUniversalTransform):
     """
     Releases deployment concurrency slots held by a flow run.
 
-    This rule releases a concurrency slot for a deployment when a flow run
-    transitions out of the Running or Cancelling state.
+    This rule is DISABLED to allow clients to explicitly release leases,
+    avoiding race conditions between server-side revocation and client-side renewal.
+    Clients now call release_concurrency_slots_with_lease() after successful
+    state transitions to terminal states.
     """
 
     async def after_transition(
         self,
         context: OrchestrationContext[orm_models.FlowRun, core.FlowRunPolicy],
     ) -> None:
-        if self.nullified_transition():
-            return
-
-        initial_state_type = (
-            context.initial_state.type if context.initial_state else None
-        )
-        proposed_state_type = (
-            context.proposed_state.type if context.proposed_state else None
-        )
-
-        # Check if the transition is valid for releasing concurrency slots.
-        # This should happen within `after_transition` because BaseUniversalTransforms
-        # don't know how to "fizzle" themselves if they encounter a transition that
-        # shouldn't apply to them, even if they use FROM_STATES and TO_STATES.
-        if not (
-            initial_state_type
-            in {
-                states.StateType.RUNNING,
-                states.StateType.CANCELLING,
-                states.StateType.PENDING,
-            }
-            and proposed_state_type
-            not in {
-                states.StateType.PENDING,
-                states.StateType.RUNNING,
-                states.StateType.CANCELLING,
-            }
-        ):
-            return
-        if not context.session or not context.run.deployment_id:
-            return
-
-        lease_storage = get_concurrency_lease_storage()
-        if (
-            context.initial_state
-            and context.initial_state.state_details.deployment_concurrency_lease_id
-            and (
-                lease := await lease_storage.read_lease(
-                    lease_id=context.initial_state.state_details.deployment_concurrency_lease_id,
-                )
-            )
-            and lease.metadata
-        ):
-            await concurrency_limits_v2.bulk_decrement_active_slots(
-                session=context.session,
-                concurrency_limit_ids=lease.resource_ids,
-                slots=lease.metadata.slots,
-            )
-            await lease_storage.revoke_lease(
-                lease_id=lease.id,
-            )
-        else:
-            deployment = await deployments.read_deployment(
-                session=context.session,
-                deployment_id=context.run.deployment_id,
-            )
-            if not deployment or not deployment.concurrency_limit_id:
-                return
-
-            await concurrency_limits_v2.bulk_decrement_active_slots(
-                session=context.session,
-                concurrency_limit_ids=[deployment.concurrency_limit_id],
-                slots=1,
-            )
+        # DISABLED: Server no longer automatically revokes leases during state transitions.
+        # Clients are responsible for explicitly releasing leases after successful
+        # state transitions to avoid race conditions with the renewal background task.
+        return
 
 
 class CacheInsertion(TaskRunOrchestrationRule):

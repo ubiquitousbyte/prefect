@@ -1192,6 +1192,232 @@ class TestFlowCrashDetection:
         # The flow run should be crashed
         assert flow_run.state.is_crashed()
 
+    async def test_lease_renewal_failure_during_state_transition_does_not_crash_sync(
+        self, prefect_client, monkeypatch, caplog
+    ):
+        """
+        Test that a flow run that completes successfully but has a lease renewal
+        failure during the state transition API call does not get marked as crashed.
+        This simulates the exact scenario from issue #19068.
+        """
+        from prefect._internal.concurrency.cancellation import CancelledError
+        from prefect.exceptions import UnfinishedRun
+
+        flow_name = f"my-flow-{uuid.uuid4()}"
+
+        @flow(name=flow_name)
+        def my_flow():
+            return 42
+
+        # Mock set_state to raise CancelledError (simulating lease cancellation)
+        original_set_state = FlowRunEngine.set_state
+        call_count = {"count": 0}
+
+        def set_state_with_cancellation(self, state, force=False):
+            call_count["count"] += 1
+            # First call is to set Running state - let it succeed
+            if call_count["count"] == 1:
+                return original_set_state(self, state, force)
+            # Second call is to set Completed state - simulate cancellation
+            # But first mark as executed to match real behavior
+            self._flow_executed = True
+            raise CancelledError()
+
+        monkeypatch.setattr(FlowRunEngine, "set_state", set_state_with_cancellation)
+
+        # Run the flow, expecting it to finish without crashing
+        # The state transition will fail but the flow itself executes successfully
+        # Since the state never transitions to Completed, calling my_flow() will
+        # raise UnfinishedRun when trying to get the result
+        with pytest.raises(UnfinishedRun):
+            my_flow()
+
+        flow_runs = await prefect_client.read_flow_runs(
+            flow_filter=FlowFilter(name=FlowFilterName(any_=[flow_name]))
+        )
+        assert len(flow_runs) == 1
+        flow_run = flow_runs[0]
+        # The flow run should NOT be crashed - it should stay in Running
+        # because the state transition to Completed failed
+        assert not flow_run.state.is_crashed()
+        # Verify the debug log message was recorded
+        assert (
+            "BaseException was raised after user code finished executing" in caplog.text
+        )
+
+    async def test_lease_renewal_failure_during_state_transition_does_not_crash_async(
+        self, prefect_client, monkeypatch, caplog
+    ):
+        """
+        Test that an async flow run that completes successfully but has a lease
+        renewal failure during the state transition API call does not get marked as crashed.
+        """
+        from prefect._internal.concurrency.cancellation import CancelledError
+        from prefect.exceptions import UnfinishedRun
+
+        flow_name = f"my-flow-{uuid.uuid4()}"
+
+        @flow(name=flow_name)
+        async def my_flow():
+            return 42
+
+        # Mock set_state to raise CancelledError (simulating lease cancellation)
+        original_set_state = AsyncFlowRunEngine.set_state
+        call_count = {"count": 0}
+
+        async def set_state_with_cancellation(self, state, force=False):
+            call_count["count"] += 1
+            # First call is to set Running state - let it succeed
+            if call_count["count"] == 1:
+                return await original_set_state(self, state, force)
+            # Second call is to set Completed state - simulate cancellation
+            # But first mark as executed to match real behavior
+            self._flow_executed = True
+            raise CancelledError()
+
+        monkeypatch.setattr(
+            AsyncFlowRunEngine, "set_state", set_state_with_cancellation
+        )
+
+        # Run the flow, expecting it to finish without crashing
+        # The state transition will fail but the flow itself executes successfully
+        # Since the state never transitions to Completed, calling my_flow() will
+        # raise UnfinishedRun when trying to get the result
+        with pytest.raises(UnfinishedRun):
+            await my_flow()
+
+        flow_runs = await prefect_client.read_flow_runs(
+            flow_filter=FlowFilter(name=FlowFilterName(any_=[flow_name]))
+        )
+        assert len(flow_runs) == 1
+        flow_run = flow_runs[0]
+        # The flow run should NOT be crashed
+        assert not flow_run.state.is_crashed()
+        # Verify the debug log message was recorded
+        assert (
+            "BaseException was raised after user code finished executing" in caplog.text
+        )
+
+    async def test_explicit_lease_release_on_completion_async(
+        self, prefect_client, monkeypatch
+    ):
+        """
+        Test that flow engine explicitly releases concurrency lease
+        after successful state transition to Completed state.
+        """
+        from unittest.mock import AsyncMock, call
+        from uuid import uuid4
+
+        flow_name = f"my-flow-{uuid.uuid4()}"
+        lease_id = uuid4()
+
+        @flow(name=flow_name)
+        async def my_flow():
+            return 42
+
+        # Create a flow run with a lease_id in the state details
+        _ = await prefect_client.create_flow_run(
+            flow=my_flow,
+            state=states.Pending(),
+        )
+
+        # Mock release_concurrency_slots_with_lease on ALL clients to track calls
+        mock_release = AsyncMock()
+
+        async def tracked_release(self, lease_id_arg):
+            mock_release(lease_id_arg)
+            return AsyncMock()()
+
+        monkeypatch.setattr(
+            type(prefect_client),
+            "release_concurrency_slots_with_lease",
+            tracked_release,
+        )
+
+        # Inject a deployment_concurrency_lease_id by mocking propose_state
+        from prefect.client.orchestration import propose_state as real_propose_state
+
+        async def mock_propose_state(client, state, flow_run_id, force=False):
+            result = await real_propose_state(
+                client, state, flow_run_id=flow_run_id, force=force
+            )
+            # Inject lease_id when transitioning to Running state
+            if result.type == states.StateType.RUNNING:
+                result.state_details.deployment_concurrency_lease_id = lease_id
+            return result
+
+        import prefect.flow_engine
+
+        monkeypatch.setattr(prefect.flow_engine, "propose_state", mock_propose_state)
+
+        # Run the flow
+        result = await my_flow()
+        assert result == 42
+
+        # Verify that release_concurrency_slots_with_lease was called with the correct lease_id
+        assert mock_release.called, "Lease release was not called"
+        assert mock_release.call_args == call(lease_id)
+
+    async def test_explicit_lease_release_on_failure_async(
+        self, prefect_client, monkeypatch
+    ):
+        """
+        Test that flow engine explicitly releases concurrency lease
+        even when flow transitions to Failed state.
+        """
+        from unittest.mock import AsyncMock, call
+        from uuid import uuid4
+
+        flow_name = f"my-flow-{uuid.uuid4()}"
+        lease_id = uuid4()
+
+        @flow(name=flow_name)
+        async def my_flow():
+            raise ValueError("Test error")
+
+        # Create a flow run
+        _ = await prefect_client.create_flow_run(
+            flow=my_flow,
+            state=states.Pending(),
+        )
+
+        # Mock release_concurrency_slots_with_lease on ALL clients to track calls
+        mock_release = AsyncMock()
+
+        async def tracked_release(self, lease_id_arg):
+            mock_release(lease_id_arg)
+            return AsyncMock()()
+
+        monkeypatch.setattr(
+            type(prefect_client),
+            "release_concurrency_slots_with_lease",
+            tracked_release,
+        )
+
+        # Inject a deployment_concurrency_lease_id by mocking propose_state
+        from prefect.client.orchestration import propose_state as real_propose_state
+
+        async def mock_propose_state(client, state, flow_run_id, force=False):
+            result = await real_propose_state(
+                client, state, flow_run_id=flow_run_id, force=force
+            )
+            # Inject lease_id when transitioning to Running state
+            if result.type == states.StateType.RUNNING:
+                result.state_details.deployment_concurrency_lease_id = lease_id
+            return result
+
+        import prefect.flow_engine
+
+        monkeypatch.setattr(prefect.flow_engine, "propose_state", mock_propose_state)
+
+        # Run the flow and expect it to fail
+        with pytest.raises(ValueError, match="Test error"):
+            await my_flow()
+
+        # Verify that release_concurrency_slots_with_lease was called with the correct lease_id
+        assert mock_release.called, "Lease release was not called on failure"
+        assert mock_release.call_args == call(lease_id)
+
 
 class TestPauseFlowRun:
     async def test_pause_flow_run_from_task_pauses_parent_flow(
